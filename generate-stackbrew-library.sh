@@ -2,17 +2,7 @@
 set -Eeuo pipefail
 
 declare -A aliases=(
-	[1.15]='1 latest'
-	[1.16-rc]='rc'
-)
-
-defaultDebianSuite='buster'
-declare -A debianSuite=(
-	#[1.13-rc]='buster'
-)
-defaultAlpineVersion='3.12'
-declare -A alpineVersion=(
-	#[1.9]='3.7'
+	[1.22]='1 latest'
 )
 
 self="$(basename "$BASH_SOURCE")"
@@ -75,6 +65,7 @@ Maintainers: Tianon Gravi <admwiggin@gmail.com> (@tianon),
              Joseph Ferguson <yosifkit@gmail.com> (@yosifkit),
              Johan Euphrosine <proppy@google.com> (@proppy)
 GitRepo: https://github.com/docker-library/golang.git
+Builder: buildkit
 EOH
 
 # prints "$2$1$3$1...$N"
@@ -94,12 +85,29 @@ for version; do
 		${aliases[$version]:-}
 	)
 
+	defaultDebianVariant="$(jq -r '
+		.[env.version].variants
+		| map(select(
+			startswith("alpine")
+			or startswith("slim-")
+			or startswith("windows/")
+			| not
+		))
+		| .[0]
+	' versions.json)"
+	defaultAlpineVariant="$(jq -r '
+		.[env.version].variants
+		| map(select(
+			startswith("alpine")
+		))
+		| .[0]
+	' versions.json)"
+
 	for v in "${variants[@]}"; do
 		dir="$version/$v"
 		[ -f "$dir/Dockerfile" ] || continue
 
 		variant="$(basename "$v")"
-		versionSuite="${debianSuite[$version]:-$defaultDebianSuite}"
 
 		fullVersion="$(jq -r '.[env.version].version' versions.json)"
 
@@ -113,7 +121,7 @@ for version; do
 		variantAliases=( "${baseAliases[@]/%/-$variant}" )
 		variantAliases=( "${variantAliases[@]//latest-/}" )
 
-		if [ "${variant#alpine}" = "${alpineVersion[$version]:-$defaultAlpineVersion}" ]; then
+		if [ "$variant" = "$defaultAlpineVariant" ]; then
 			variantAliases+=( "${baseAliases[@]/%/-alpine}" )
 			variantAliases=( "${variantAliases[@]//latest-/}" )
 		fi
@@ -124,17 +132,24 @@ for version; do
 				;;
 
 			*)
-				variantParent="$(awk 'toupper($1) == "FROM" { print $2 }' "$dir/Dockerfile")"
+				variantParent="$(awk 'toupper($1) == "FROM" { print $2 }' "$dir/Dockerfile" | sort -u)" # TODO this needs to handle multi-parents (we get lucky that they're the same)
 				variantArches="${parentRepoToArches[$variantParent]}"
-
-				if [ "$variant" = 'stretch' ]; then
-					# stretch's "golang-go" package doesn't include GOARM for arm32v5
-					variantArches="$(sed <<<" $variantArches " -e 's/ arm32v5 / /g')"
-					# ... and "gccgo" in stretch can't build mips64le
-					variantArches="$(sed <<<" $variantArches " -e 's/ mips64le / /g')"
-				fi
 				;;
 		esac
+
+		# cross-reference with supported architectures
+		for arch in $variantArches; do
+			if ! jq -e --arg arch "$arch" '.[env.version].arches[$arch].supported' versions.json &> /dev/null; then
+				variantArches="$(sed <<<" $variantArches " -e "s/ $arch / /g")"
+			fi
+		done
+		# TODO rewrite this whole loop into a single jq expression :)
+		variantArches="${variantArches% }"
+		variantArches="${variantArches# }"
+		if [ -z "$variantArches" ]; then
+			echo >&2 "error: '$dir' has no supported architectures!"
+			exit 1
+		fi
 
 		sharedTags=()
 		for windowsShared in windowsservercore nanoserver; do
@@ -144,7 +159,7 @@ for version; do
 				break
 			fi
 		done
-		if [ "$variant" = "$versionSuite" ] || [[ "$variant" == 'windowsservercore'* ]]; then
+		if [ "$variant" = "$defaultDebianVariant" ] || [[ "$variant" == 'windowsservercore'* ]]; then
 			sharedTags+=( "${baseAliases[@]}" )
 		fi
 
@@ -169,6 +184,9 @@ for version; do
 			GitCommit: $commit
 			Directory: $dir
 		EOE
-		[ -z "$constraints" ] || echo "Constraints: $constraints"
+		if [ -n "$constraints" ]; then
+			echo 'Builder: classic'
+			echo "Constraints: $constraints"
+		fi
 	done
 done

@@ -1,4 +1,10 @@
-FROM mcr.microsoft.com/windows/{{ env.windowsVariant }}:{{ env.windowsRelease }}
+#
+# NOTE: THIS DOCKERFILE IS GENERATED VIA "apply-templates.sh"
+#
+# PLEASE DO NOT EDIT IT DIRECTLY.
+#
+
+FROM mcr.microsoft.com/windows/nanoserver:1809
 
 SHELL ["cmd", "/S", "/C"]
 
@@ -15,10 +21,10 @@ RUN setx /m PATH "%GOPATH%\bin;C:\Program Files\Go\bin;%PATH%"
 USER ContainerUser
 # doing this first to share cache across versions more aggressively
 
-ENV GOLANG_VERSION {{ .version }}
+ENV GOLANG_VERSION 1.21.8
 
 # Docker's Windows path parsing is absolutely *cursed*; please just trust me on this one -Tianon
-COPY --from=golang:{{ .version }}-windowsservercore-{{ env.windowsRelease }} ["C:\\\\Program Files\\\\Go","C:\\\\Program Files\\\\Go"]
+COPY --from=golang:1.21.8-windowsservercore-1809 ["C:\\\\Program Files\\\\Go","C:\\\\Program Files\\\\Go"]
 RUN go version
 
 WORKDIR $GOPATH

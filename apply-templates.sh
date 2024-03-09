@@ -7,7 +7,8 @@ jqt='.jq-template.awk'
 if [ -n "${BASHBREW_SCRIPTS:-}" ]; then
 	jqt="$BASHBREW_SCRIPTS/jq-template.awk"
 elif [ "$BASH_SOURCE" -nt "$jqt" ]; then
-	wget -qO "$jqt" 'https://github.com/docker-library/bashbrew/raw/5f0c26381fb7cc78b2d217d58007800bdcfbcfa1/scripts/jq-template.awk'
+	# https://github.com/docker-library/bashbrew/blob/master/scripts/jq-template.awk
+	wget -qO "$jqt" 'https://github.com/docker-library/bashbrew/raw/9f6a35772ac863a0241f147c820354e4008edf38/scripts/jq-template.awk'
 fi
 
 if [ "$#" -eq 0 ]; then
@@ -29,6 +30,8 @@ generated_warning() {
 for version; do
 	export version
 
+	rm -rf "$version/"
+
 	variants="$(jq -r '.[env.version].variants | map(@sh) | join(" ")' versions.json)"
 	eval "variants=( $variants )"
 
@@ -39,20 +42,16 @@ for version; do
 		export variant
 
 		case "$dir" in
-			alpine*)
-				template='Dockerfile-alpine.template'
-				;;
-
 			windows/*)
 				windowsVariant="${variant%%-*}" # "windowsservercore", "nanoserver"
-				windowsRelease="${variant#$windowsVariant-}" # "1809", "ltsc2016", etc
+				windowsRelease="${variant#$windowsVariant-}" # "ltsc2022", "1809", etc
 				windowsVariant="${windowsVariant#windows}" # "servercore", "nanoserver"
 				export windowsVariant windowsRelease
 				template="Dockerfile-windows-$windowsVariant.template"
 				;;
 
 			*)
-				template='Dockerfile-debian.template'
+				template='Dockerfile-linux.template'
 				;;
 		esac
 

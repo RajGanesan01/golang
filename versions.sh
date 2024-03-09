@@ -2,18 +2,23 @@
 set -Eeuo pipefail
 
 # see https://golang.org/dl/
-declare -A golangArches=(
-	['amd64']='linux-amd64'
-	['arm32v7']='linux-armv6l'
-	['arm64v8']='linux-arm64'
-	['i386']='linux-386'
-	['ppc64le']='linux-ppc64le'
-	['s390x']='linux-s390x'
-	['windows-amd64']='windows-amd64'
+potentiallySupportedArches=(
+	amd64
+	arm32v5
+	arm32v6
+	arm32v7
+	arm64v8
+	i386
+	mips64le
+	ppc64le
+	riscv64
+	s390x
+	windows-amd64
 
 	# special case (fallback)
-	['src']='src'
+	src
 )
+potentiallySupportedArches="$(jq -sRc <<<"${potentiallySupportedArches[*]}" 'rtrimstr("\n") | split(" ")')"
 
 cd "$(dirname "$(readlink -f "$BASH_SOURCE")")"
 
@@ -26,130 +31,158 @@ else
 fi
 versions=( "${versions[@]%/}" )
 
-# https://github.com/golang/go/issues/13220
-allGoVersions='{}'
-apiBaseUrl='https://www.googleapis.com/storage/v1/b/golang/o?fields=nextPageToken,items%2Fname'
-pageToken=
-while [ "$pageToken" != 'null' ]; do
-	page="$(curl -fsSL "$apiBaseUrl&pageToken=$pageToken")"
-	# now that we have this page's data, get ready for the next request
-	pageToken="$(jq <<<"$page" -r '.nextPageToken')"
+# https://pkg.go.dev/golang.org/x/website/internal/dl
+# https://github.com/golang/go/issues/23746
+# https://github.com/golang/go/issues/34864
+# https://github.com/golang/website/blob/41e922072f17ab2826d9479338314c025602a3a1/internal/dl/server.go#L174-L182 ... (the only way to get "unstable" releases is via "all", so we get to sort through "archive" releases too)
+goVersions="$(
+	wget -qO- 'https://golang.org/dl/?mode=json&include=all' | jq -c '
+		[
+			.[]
+			| ( .version | ltrimstr("go") ) as $version
+			| ( $version | sub("^(?<m>[0-9]+[.][0-9]+).*$"; "\(.m)") ) as $major
+			| {
+				version: $version,
+				major: ( $major + if .stable then "" else "-rc" end ),
+				arches: (
+					[
+						.files[]
+						| select(.kind == "archive" or .kind == "source")
+						| (
+							if .kind == "source" then
+								"src"
+							else
+								if .os != "linux" then
+									.os + "-"
+								else "" end
+								+ (
+									.arch
+									| sub("^386$"; "i386")
+									| sub("^arm64$"; "arm64v8")
+									| sub("^arm-?v?(?<v>[0-9]+)l?$"; "arm32v\(.v)")
+								)
+							end
+						) as $bashbrewArch
+						| {
+							( $bashbrewArch ): (
+								{
+									url: ("https://dl.google.com/go/" + .filename),
+									sha256: .sha256,
+									env: { GOOS: .os, GOARCH: .arch },
+								}
+							),
+						}
+					]
+					| add
 
-	# for each API page, collect the "version => arches" pairs we find
-	goVersions="$(
-		jq <<<"$page" -r '
-			[
-				.items as $items
-				| $items[].name
-				| match("^go([0-9].*)[.](src|(linux|windows)-[^.]+)[.](tar[.]gz|zip)$")
-				| .captures[0].string as $version
-				| .captures[1].string as $arch
-				| { version: $version, arch: $arch }
-			] | reduce .[] as $o (
-				{};
-				.[$o.version] += [ $o.arch ]
-			)
-		'
-	)"
-
-	# ... and aggregate them together into a single object of "version => arches" pairs
-	allGoVersions="$(
-		jq <<<"$allGoVersions"$'\n'"$goVersions" -cs '
-			map(to_entries) | add
-			| reduce .[] as $o (
-				{};
-				.[$o.key] = (
-					$o.value + .[$o.key]
-					| unique
+					# upstream (still as of 2023-12-19) only publishes "armv6" binaries, which are appropriate for v7 as well
+					| if (has("arm32v7") | not) and has("arm32v6") then
+						.["arm32v7"] = .["arm32v6"]
+					else . end
 				)
-			)
-		'
-	)"
-done
+			}
+		]
+	'
+)"
 
 for version in "${versions[@]}"; do
-	rcVersion="${version%-rc}"
-	rcRegex='^[^a-z]*$'
-	if [ "$rcVersion" != "$version" ]; then
-		# beta, rc, etc
-		rcRegex='[a-z]+[0-9]*$'
-	fi
+	export version
 
-	export rcVersion rcRegex
-	fullVersion="$(
-		jq <<<"$allGoVersions" -r '
-			. as $map
-			| keys[] | select(
-				startswith(env.rcVersion)
-				and (
-					ltrimstr(env.rcVersion)
-					| test(env.rcRegex)
+	if \
+		! goJson="$(jq <<<"$goVersions" -ce '
+			[ .[] | select(.major == env.version) ] | sort_by(
+				.version
+				| split(".")
+				| map(
+					if test("^[0-9]+$") then
+						tonumber
+					else . end
 				)
-				and ($map[.] | index("src"))
-			)
-		' | sort -rV | head -1
-	)"
-	if [ -z "$fullVersion" ]; then
+			)[-1]
+		')" \
+		|| ! fullVersion="$(jq <<<"$goJson" -r '.version')" \
+		|| [ -z "$fullVersion" ] \
+	; then
 		echo >&2 "warning: cannot find full version for $version"
 		continue
 	fi
 
 	echo "$version: $fullVersion"
 
-	export fullVersion
-	doc="$(
-		jq -nc '{
-			version: env.fullVersion,
-			arches: {},
-			variants: [],
-		}'
-	)"
+	doc="$(jq <<<"$goJson" -c --argjson potentiallySupportedArches "$potentiallySupportedArches" '{
+		version: .version,
+		arches: (
+			.arches
+			| . += (
+				( $potentiallySupportedArches - keys ) # "missing" arches that we ought to include in our list
+				| map(
+					{
+						(.): {
+							env: (
+								# hacky, but probably close enough (cleaned up in the next block)
+								capture("^((?<GOOS>[^-]+)-)?(?<GOARCH>.+)$")
+								| .GOOS //= "linux"
+							)
+						},
+					}
+				)
+				| add
+			)
+			| with_entries(
+				.key as $bashbrewArch
+				| .value.supported = (
+					# https://github.com/docker-library/golang/pull/500#issuecomment-1863578601 - as of Go 1.21+, we no longer build from source
+					.value.url
+					and ($potentiallySupportedArches | index($bashbrewArch))
+				)
+				| .value.env +=
+						if $bashbrewArch == "i386" then
+							# i386 in Debian is non-SSE2, Alpine appears to be similar (but interesting, not FreeBSD?)
+							{ GOARCH: "386", GO386: "softfloat" }
+						elif $bashbrewArch == "amd64" then
+							# https://tip.golang.org/doc/go1.18#amd64
+							{ GOAMD64: "v1" }
+						# TODO ^^ figure out what to do with GOAMD64 / GO386 if/when the OS baselines change and these choices needs to be per-variant /o\ (probably move it to the template instead, in fact, since that is where we can most easily toggle based on variant)
+						elif $bashbrewArch | startswith("arm64v") then
+							{ GOARCH: "arm64" } # TODO do something with arm64 variant
+						elif $bashbrewArch | startswith("arm32v") then
+							{ GOARCH: "arm", GOARM: ($bashbrewArch | ltrimstr("arm32v")) }
+						else {} end
+				| if $bashbrewArch == "src" then del(.value.env) else . end
+			)
+		),
+		variants: [
+			"bookworm",
+			"bullseye",
+			(
+				"3.19",
+				"3.18",
+				empty
+			| "alpine" + .),
+			if .arches | has("windows-amd64") and .["windows-amd64"].url then
+				(
+					"ltsc2022",
+					"1809",
+					empty
+				| "windows/windowsservercore-" + .),
+				(
+					"ltsc2022",
+					"1809",
+					empty
+				| "windows/nanoserver-" + .)
+			else empty end
+		],
+	}')"
 
-	arches="$(jq <<<"$allGoVersions" -c '.[env.fullVersion]')"
-
-	# loop over bashbrew arches, get sha256 for each one supported
-	for bashbrewArch in "${!golangArches[@]}"; do
-		arch="${golangArches[$bashbrewArch]}"
-		export arch
-		if jq <<<"$arches" -e 'index(env.arch) != null' > /dev/null; then
-			file="go${fullVersion}.$arch.$([[ "$arch" == windows-* ]] && echo 'zip' || echo 'tar.gz')"
-			url="https://storage.googleapis.com/golang/$file"
-			# https://github.com/golang/build/commit/24f7399f96feb8dd2fc54f064e47a886c2f8bb4a
-			if sha256="$(curl -fsSL "$url.sha256")"; then
-				export bashbrewArch arch url sha256
-				doc="$(
-					jq <<<"$doc" -c '.arches[env.bashbrewArch] = {
-						arch: env.arch,
-						url: env.url,
-						sha256: env.sha256,
-					}'
-				)"
-			fi
-		fi
-	done
-
-	# order here controls the order of the library/ file
-	for variant in \
-		buster \
-		stretch \
-		\
-		alpine3.12 \
-		alpine3.11 \
-		\
-		windows/windowsservercore-{1809,ltsc2016} \
-		windows/nanoserver-1809 \
-	; do
-		base="${variant%%/*}" # "buster", "windows", etc.
-		[ -d "$version/$base" ] || continue
-		if [ "$base" = 'windows' ] && ! jq <<<"$arches" -e 'index("windows-amd64")' > /dev/null; then
-			continue
-		fi
-		export variant
-		doc="$(jq <<<"$doc" -c '.variants += [ env.variant ]')"
-	done
-
-	export version
 	json="$(jq <<<"$json" -c --argjson doc "$doc" '.[env.version] = $doc')"
 done
 
-jq <<<"$json" -S . > versions.json
+jq <<<"$json" '
+	def sort_keys:
+		to_entries
+		| sort_by(.key)
+		| from_entries
+	;
+	sort_keys
+	| .[].arches |= sort_keys
+' > versions.json
