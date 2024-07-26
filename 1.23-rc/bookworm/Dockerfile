@@ -4,60 +4,54 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM alpine:3.19 AS build
+FROM buildpack-deps:bookworm-scm AS build
 
 ENV PATH /usr/local/go/bin:$PATH
 
-ENV GOLANG_VERSION 1.21.12
+ENV GOLANG_VERSION 1.23rc2
 
 RUN set -eux; \
 	now="$(date '+%s')"; \
-	apk add --no-cache --virtual .fetch-deps \
-		ca-certificates \
-		gnupg \
-# busybox's "tar" doesn't handle directory mtime correctly, so our SOURCE_DATE_EPOCH lookup doesn't work (the mtime of "/usr/local/go" always ends up being the extraction timestamp)
-		tar \
-	; \
-	arch="$(apk --print-arch)"; \
+	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
 	url=; \
 	case "$arch" in \
-		'x86_64') \
-			url='https://dl.google.com/go/go1.21.12.linux-amd64.tar.gz'; \
-			sha256='121ab58632787e18ae0caa8ae285b581f9470d0f6b3defde9e1600e211f583c5'; \
+		'amd64') \
+			url='https://dl.google.com/go/go1.23rc2.linux-amd64.tar.gz'; \
+			sha256='fa906bbb6d2077a1a58d91ca267e0fc5cb6d437807fb0725d10f23531e9258d2'; \
 			;; \
 		'armhf') \
-			url='https://dl.google.com/go/go1.21.12.linux-armv6l.tar.gz'; \
-			sha256='04148803fdee283c0259bc971eddefa4134dc2695a3de01aebe17787bf4705b6'; \
+			url='https://dl.google.com/go/go1.23rc2.linux-armv6l.tar.gz'; \
+			sha256='153c3350289ac2f5ffa1b57fcdc841f7adf2566eb7c4fc7c30bd74c849592f26'; \
 			;; \
-		'armv7') \
-			url='https://dl.google.com/go/go1.21.12.linux-armv6l.tar.gz'; \
-			sha256='04148803fdee283c0259bc971eddefa4134dc2695a3de01aebe17787bf4705b6'; \
+		'arm64') \
+			url='https://dl.google.com/go/go1.23rc2.linux-arm64.tar.gz'; \
+			sha256='56f89c249ba8a2fb642a23c62eadaaea10622e60a6c6149eaf853c951134b0af'; \
 			;; \
-		'aarch64') \
-			url='https://dl.google.com/go/go1.21.12.linux-arm64.tar.gz'; \
-			sha256='94cb3ec4a1e08a00da55c33e63f725be91f10ba743907b5615ef34e54675ba2e'; \
+		'i386') \
+			url='https://dl.google.com/go/go1.23rc2.linux-386.tar.gz'; \
+			sha256='90f198b445a8bdbee60b40cd4114f0d223f74220c6e6d3ae290d884d2bcb948f'; \
 			;; \
-		'x86') \
-			url='https://dl.google.com/go/go1.21.12.linux-386.tar.gz'; \
-			sha256='c1afee9e774d280211ee31437f32cdda8cbc506c1475e16bd3a8fd1ebf5c4b1d'; \
+		'mips64el') \
+			url='https://dl.google.com/go/go1.23rc2.linux-mips64le.tar.gz'; \
+			sha256='5d42088e3b61111deb98004b370838dbb748b02754d3e490db7e7e4760c29d58'; \
 			;; \
-		'ppc64le') \
-			url='https://dl.google.com/go/go1.21.12.linux-ppc64le.tar.gz'; \
-			sha256='46b2dae42132fd697c6c34a6bee3df8e3288b9f01143eafbcc452b0d2a35b205'; \
+		'ppc64el') \
+			url='https://dl.google.com/go/go1.23rc2.linux-ppc64le.tar.gz'; \
+			sha256='0abdbe35a72b9cfce2b724cd3e8f758a85637b28708a782a1b62c8cbdd227582'; \
 			;; \
 		'riscv64') \
-			url='https://dl.google.com/go/go1.21.12.linux-riscv64.tar.gz'; \
-			sha256='17db3a49b6443c1df893b48b40c8e6de06064be4c203285f4010254be842e5eb'; \
+			url='https://dl.google.com/go/go1.23rc2.linux-riscv64.tar.gz'; \
+			sha256='1a94ada9db18733c57cad1808ee27a3be1187ce0ff72a3a6de97b4168f6520bf'; \
 			;; \
 		's390x') \
-			url='https://dl.google.com/go/go1.21.12.linux-s390x.tar.gz'; \
-			sha256='3746ddaafedb9f1744a647c51b9c4454b82a699de0f6dffbb2f3cb698a846482'; \
+			url='https://dl.google.com/go/go1.23rc2.linux-s390x.tar.gz'; \
+			sha256='42b96f44b1e79b85678d41257fc58fb6cdb8ce176b1dd3a2a3060eceb771aba6'; \
 			;; \
 		*) echo >&2 "error: unsupported architecture '$arch' (likely packaging update needed)"; exit 1 ;; \
 	esac; \
 	\
 	wget -O go.tgz.asc "$url.asc"; \
-	wget -O go.tgz "$url"; \
+	wget -O go.tgz "$url" --progress=dot:giga; \
 	echo "$sha256 *go.tgz" | sha256sum -c -; \
 	\
 # https://github.com/golang/go/issues/14739#issuecomment-324767697
@@ -82,7 +76,7 @@ RUN set -eux; \
 # sanity check (detected value should be older than our wall clock)
 	[ "$SOURCE_DATE_EPOCH" -lt "$now" ]; \
 	\
-	if [ "$arch" = 'armv7' ]; then \
+	if [ "$arch" = 'armhf' ]; then \
 		[ -s /usr/local/go/go.env ]; \
 		before="$(go env GOARM)"; [ "$before" != '7' ]; \
 		{ \
@@ -101,8 +95,6 @@ RUN set -eux; \
 	ln -svfT /target/usr/local/go /usr/local/go; \
 	touch -t "$touchy" /target/usr/local /target/usr /target; \
 	\
-	apk del --no-network .fetch-deps; \
-	\
 # smoke test
 	go version; \
 # make sure our reproducibile timestamp is probably still correct (best-effort inline reproducibility test)
@@ -110,11 +102,21 @@ RUN set -eux; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \
 	find /target -newer /target/usr/local/go -exec sh -c 'ls -ld "$@" && exit "$#"' -- '{}' +
 
-FROM alpine:3.19
+FROM buildpack-deps:bookworm-scm
 
-RUN apk add --no-cache ca-certificates
+# install cgo-related dependencies
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		g++ \
+		gcc \
+		libc6-dev \
+		make \
+		pkg-config \
+	; \
+	rm -rf /var/lib/apt/lists/*
 
-ENV GOLANG_VERSION 1.21.12
+ENV GOLANG_VERSION 1.23rc2
 
 # don't auto-upgrade the gotoolchain
 # https://github.com/docker-library/golang/issues/472
